@@ -111,7 +111,7 @@ def load_metadata(filepath):
 # --- Main App Logic ---
 
 # --- Load Metadata ---
-file_path = r"C:\Users\Arydeep\Desktop\Miscallenous\SIH\Data_Analytics\DWLR_MAHARASHTRA_AND_GOA.csv"
+file_path = "DWLR_MAHARASHTRA_AND_GOA.csv"
 metadata_df = load_metadata(file_path)
 
 # --- Sidebar for Well Selection ---

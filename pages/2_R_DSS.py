@@ -261,7 +261,7 @@ if 'well_no' not in st.session_state or st.session_state['well_no'] is None:
 else:
     current_well_no = st.session_state['well_no']
     historical_df = get_full_well_history(current_well_no)
-    file_path = r"C:\Users\Arydeep\Desktop\Miscallenous\SIH\Data_Analytics\DWLR_MAHARASHTRA_AND_GOA.csv"
+    file_path = "DWLR_MAHARASHTRA_AND_GOA.csv"
     metadata_df = load_metadata(file_path)
 
     st.markdown('<div class="dss-container">', unsafe_allow_html=True)
