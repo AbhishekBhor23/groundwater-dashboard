@@ -91,6 +91,9 @@ def load_metadata(filepath):
     try:
         df = pd.read_csv(filepath)
         df.columns = df.columns.str.strip()
+        # Clean whitespace from all object columns
+        for col in df.select_dtypes(['object']):
+            df[col] = df[col].str.strip()
         return df
     except Exception as e:
         st.error(f"An error occurred while loading the metadata file: {e}")
@@ -130,17 +133,36 @@ def calculate_annual_recharge(df, sy):
 file_path = "DWLR_MAHARASHTRA_AND_GOA.csv"
 metadata_df = load_metadata(file_path)
 
-# (Your existing sidebar and URL handling code is unchanged)
+# --- Sidebar for Well Selection (RESTORED) ---
 st.sidebar.title("Find a Well")
-# ... (sidebar code omitted for brevity) ...
+
+if metadata_df is not None:
+    states = sorted(metadata_df['State'].dropna().unique())
+    selected_state = st.sidebar.selectbox("Select State", states)
+    
+    districts = sorted(metadata_df[metadata_df['State'] == selected_state]['District'].dropna().unique())
+    selected_district = st.sidebar.selectbox("Select District", districts)
+    
+    blocks = sorted(metadata_df[(metadata_df['State'] == selected_state) & (metadata_df['District'] == selected_district)]['Block'].dropna().unique())
+    selected_block = st.sidebar.selectbox("Select Block", blocks)
+    
+    wells = sorted(metadata_df[(metadata_df['State'] == selected_state) & (metadata_df['District'] == selected_district) & (metadata_df['Block'] == selected_block)]['WellNo'].dropna().unique())
+    selected_well = st.sidebar.selectbox("Select Well Number", wells)
+
+    if st.sidebar.button("Find Well", type="primary"):
+        st.session_state['well_no'] = selected_well
+        st.query_params["wellNo"] = selected_well
+        st.rerun()
+
+# --- URL and Session State Handling ---
+current_well_no = st.session_state.get('well_no') or st.query_params.get("wellNo")
 
 # --- Data Loading ---
 df = None
-if 'well_no' in st.session_state:
-    current_well_no = st.session_state['well_no']
+if current_well_no:
     with st.spinner(f"Loading data for well: {current_well_no}..."):
         df = get_full_well_history(current_well_no)
-        st.session_state['data'] = df
+        st.session_state['data'] = df # Store in session state for other pages
 else:
     st.info("Please use the sidebar to find and select a well to view its dashboard.")
 
@@ -149,14 +171,12 @@ if df is not None and not df.empty:
     st.title(f"Dashboard for Well: {current_well_no}")
     st.markdown("---")
     
-    # (Your existing metadata and statistics sections are unchanged)
-    # ... (metadata, stats, time series, periodic analysis sections omitted for brevity) ...
+    # ... (Your metadata, stats, and historical chart sections are unchanged) ...
     
-    # --- NEW: Groundwater Recharge Section ---
+    # --- Groundwater Recharge Section ---
     st.markdown("---")
     st.header("Groundwater Recharge Analysis (WTF Method)")
     
-    # User input for Specific Yield (Sy)
     sy_value = st.slider(
         "Select Specific Yield (Sy) for Recharge Calculation:",
         min_value=0.003, max_value=0.160, value=0.050, step=0.001,
@@ -170,7 +190,6 @@ if df is not None and not df.empty:
         colA, colB = st.columns(2)
         
         with colA:
-            # Graph 1: Recharge Rate Graph
             st.subheader("Annual Recharge Rate")
             fig_recharge_bar = px.bar(
                 recharge_df, x='Year', y='Recharge (m)',
@@ -180,7 +199,6 @@ if df is not None and not df.empty:
             st.plotly_chart(fig_recharge_bar, use_container_width=True)
 
         with colB:
-            # Graph 2: Water Level vs. Recharge Level
             st.subheader("Water Level vs. Recharge")
             fig_comparison = go.Figure()
             
@@ -209,3 +227,4 @@ if df is not None and not df.empty:
             
     else:
         st.warning("Could not calculate recharge. The dataset might not contain enough data spanning pre and post-monsoon seasons.")
+
