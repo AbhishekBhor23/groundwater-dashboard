@@ -13,12 +13,12 @@ st.info(
     "geospatial factor influencing groundwater accumulation."
 )
 
-# --- MODIFIED: GitHub Configuration Updated ---
+# --- GitHub Configuration ---
 GITHUB_USERNAME = "AbhishekBhor23"
 GITHUB_REPOSITORY = "groundwater-dashboard"
-BRANCH_NAME = "main" # Or "master", depending on your repo
+BRANCH_NAME = "main"
 
-# --- Map Data (using filenames from your previous screenshot) ---
+# --- Map Data ---
 map_files = [
     "DD.png",
     "Geomorphology.png",
@@ -32,31 +32,31 @@ map_files = [
 # --- Display Maps in a Grid ---
 st.markdown("### Thematic Maps for Analysis")
 
-# Create a two-column layout that stacks on mobile
+# Create a two-column layout
 col1, col2 = st.columns(2)
 
 # Loop through the map files and display them in the columns
 for i, map_file in enumerate(map_files):
-    # Construct the full URL to the raw image on GitHub
     image_url = f"https://raw.githubusercontent.com/{GITHUB_USERNAME}/{GITHUB_REPOSITORY}/{BRANCH_NAME}/FINAL_MAPS/{map_file}"
-    
-    # Get a clean title from the filename
     map_title = map_file.replace('.png', '').replace('_', ' ')
     
     # Alternate between column 1 and column 2
     if i % 2 == 0:
         with col1:
-            st.image(image_url, caption=f"Fig {i+1}: {map_title}", use_column_width=True)
+            # MODIFIED: Changed use_column_width to use_container_width
+            st.image(image_url, caption=f"Fig {i+1}: {map_title}", use_container_width=True)
             st.markdown("---")
     else:
         with col2:
-            st.image(image_url, caption=f"Fig {i+1}: {map_title}", use_column_width=True)
+            # MODIFIED: Changed use_column_width to use_container_width
+            st.image(image_url, caption=f"Fig {i+1}: {map_title}", use_container_width=True)
             st.markdown("---")
 
 # --- Final Conclusion Map ---
 st.markdown("### Final Potential Recharge Zones Map")
-final_map_file = "GWPZ.png" # Using the filename from your screenshot
+final_map_file = "GWPZ.png"
 final_image_url = f"https://raw.githubusercontent.com/{GITHUB_USERNAME}/{GITHUB_REPOSITORY}/{BRANCH_NAME}/FINAL_MAPS/{final_map_file}"
 
-st.image(final_image_url, caption="Final map showing areas with high potential for groundwater recharge.", use_column_width=True)
+# MODIFIED: Changed use_column_width to use_container_width
+st.image(final_image_url, caption="Final map showing areas with high potential for groundwater recharge.", use_container_width=True)
 
