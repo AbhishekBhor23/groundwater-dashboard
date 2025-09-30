@@ -133,7 +133,7 @@ def calculate_annual_recharge(df, sy):
 file_path = "DWLR_MAHARASHTRA_AND_GOA.csv"
 metadata_df = load_metadata(file_path)
 
-# --- Sidebar for Well Selection (RESTORED) ---
+# --- Sidebar for Well Selection ---
 st.sidebar.title("Find a Well")
 
 if metadata_df is not None:
@@ -171,10 +171,85 @@ if df is not None and not df.empty:
     st.title(f"Dashboard for Well: {current_well_no}")
     st.markdown("---")
     
-    # ... (Your metadata, stats, and historical chart sections are unchanged) ...
+    # --- METADATA, STATS, AND HISTORICAL GRAPHS (RESTORED) ---
+    df['year'], df['month'] = df['date'].dt.year, df['date'].dt.strftime('%B')
+    
+    well_metadata = None
+    if metadata_df is not None:
+        metadata_df['WellNo'] = metadata_df['WellNo'].astype(str)
+        well_metadata = metadata_df[metadata_df['WellNo'] == str(current_well_no)]
+
+    if well_metadata is not None and not well_metadata.empty:
+        st.subheader("Well Metadata")
+        meta_row = well_metadata.iloc[0]
+        meta_col1, meta_col2 = st.columns([1.5, 1])
+        with meta_col1:
+            lat, lon = meta_row.get('Latitude', 0), meta_row.get('Longitude', 0)
+            if pd.notna(lat) and pd.notna(lon):
+                m = folium.Map(location=[lat, lon], zoom_start=13)
+                folium.TileLayer('CartoDB positron', name='Normal View').add_to(m)
+                folium.TileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}', attr='Esri', name='Satellite').add_to(m)
+                folium.Marker([lat, lon], popup=f"Well No: {current_well_no}").add_to(m)
+                folium.LayerControl().add_to(m)
+                st_folium(m, use_container_width=True, height=250)
+            else:
+                st.info("Location coordinates not available for map.")
+        with meta_col2:
+            st.markdown(f"**State:** {meta_row.get('State', 'N/A')}")
+            st.markdown(f"**Block:** {meta_row.get('Block', 'N/A')}")
+            st.markdown(f"**Village:** {meta_row.get('Village', 'N/A')}")
+            st.markdown(f"**Latitude:** {meta_row.get('Latitude', 0):.4f}")
+            st.markdown(f"**Longitude:** {meta_row.get('Longitude', 0):.4f}")
+        st.markdown("---")
+    
+    st.subheader("All-Time Statistics")
+    latest_value, avg_value, min_value, max_value = df['value'].iloc[-1], df['value'].mean(), df['value'].min(), df['value'].max()
+    col1, col2, col3, col4 = st.columns(4)
+    with col1: st.metric(label="Latest Water Level (m)", value=f"{latest_value:.2f}")
+    with col2: st.metric(label="Average Water Level (m)", value=f"{avg_value:.2f}")
+    with col3: st.metric(label="Highest Recorded Level (m)", value=f"{min_value:.2f}")
+    with col4: st.metric(label="Lowest Recorded Level (m)", value=f"{max_value:.2f}")
+    st.markdown("<br>", unsafe_allow_html=True)
+
+    st.subheader("Historical Trend")
+    duration_options = ["3D", "1W", "1M", "3M", "6M", "1Y", "3Y", "Max"]
+    selected_duration = st.radio("Select Duration", options=duration_options, index=len(duration_options)-1, horizontal=True, label_visibility="collapsed", key='selected_duration_key')
+
+    end_date = df['date'].max()
+    display_df = df
+    if selected_duration != "Max":
+        if selected_duration == "3D": start_date = end_date - pd.Timedelta(days=3)
+        elif selected_duration == "1W": start_date = end_date - pd.Timedelta(weeks=1)
+        elif selected_duration == "1M": start_date = end_date - pd.DateOffset(months=1)
+        elif selected_duration == "3M": start_date = end_date - pd.DateOffset(months=3)
+        elif selected_duration == "6M": start_date = end_date - pd.DateOffset(months=6)
+        elif selected_duration == "1Y": start_date = end_date - pd.DateOffset(years=1)
+        elif selected_duration == "3Y": start_date = end_date - pd.DateOffset(years=3)
+        display_df = df[df['date'] >= start_date]
+
+    fig_line = go.Figure(go.Scatter(x=display_df['date'], y=display_df['value'], mode='lines', name='Daily Water Level'))
+    fig_line.update_layout(title='Daily Water Level Over Time', template=chart_theme, plot_bgcolor='rgba(0,0,0,0)', paper_bgcolor='rgba(0,0,0,0)')
+    st.plotly_chart(fig_line, use_container_width=True)
+    st.markdown("<br>", unsafe_allow_html=True)
+    
+    st.subheader("Periodic Analysis")
+    colA, colB = st.columns(2)
+    with colA:
+        yearly_avg = df.groupby('year')['value'].mean().reset_index()
+        fig_bar = px.bar(yearly_avg, x='year', y='value', title='Average Annual Water Level')
+        fig_bar.update_layout(template=chart_theme, plot_bgcolor='rgba(0,0,0,0)', paper_bgcolor='rgba(0,0,0,0)')
+        st.plotly_chart(fig_bar, use_container_width=True)
+    with colB:
+        df['month_num'] = df['date'].dt.month
+        monthly_range = df.groupby(['month', 'month_num'])['value'].agg(['min', 'max']).reset_index().sort_values('month_num')
+        fig_range = go.Figure()
+        fig_range.add_trace(go.Scatter(x=monthly_range['month'], y=monthly_range['max'], mode='lines', name='Max Level'))
+        fig_range.add_trace(go.Scatter(x=monthly_range['month'], y=monthly_range['min'], mode='lines', name='Min Level', fill='tonexty'))
+        fig_range.update_layout(title='Monthly Water Level Range', template=chart_theme, plot_bgcolor='rgba(0,0,0,0)', paper_bgcolor='rgba(0,0,0,0)')
+        st.plotly_chart(fig_range, use_container_width=True)
+    st.markdown("---")
     
     # --- Groundwater Recharge Section ---
-    st.markdown("---")
     st.header("Groundwater Recharge Analysis (WTF Method)")
     
     sy_value = st.slider(
