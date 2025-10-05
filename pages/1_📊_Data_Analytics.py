@@ -68,16 +68,19 @@ chart_theme = "plotly_dark" if st.session_state.get("theme", "Dark") == "Dark" e
 @st.cache_data
 def get_full_well_history(well_no):
     """Fetches full historical data for a given well number from the API."""
+    # This should be your deployed Google Apps Script URL
     APPS_SCRIPT_URL = "https://script.google.com/macros/s/AKfycbwYz0qXjiJD3k6vIuJ5eNdthQV4Tf14EyiyuT8VTE0-NWN-aoY5qZXBBzUDK2LZjGsL/exec"
-    api_url = f"{APPS_SCRIPT_URL}?wellNo={well_no}&mode=full"
+    api_url = f"{APPS_SCRIPT_URL}?wellNo={well_no}" # Removed mode=full as the new script doesn't need it
     try:
         response = requests.get(api_url)
         response.raise_for_status()
         data = response.json()
-        if "error" in data:
-            st.error(data["error"])
+        if data.get("error"):
+            st.error(data["message"])
             return None
-        df = pd.DataFrame(data)
+        # The new Apps Script returns a dictionary, historicalData is a key
+        df = pd.DataFrame(data['historicalData'])
+        df.rename(columns={'timestamp': 'date', 'water_level': 'value'}, inplace=True)
         df['date'] = pd.to_datetime(df['date'])
         df = df.sort_values(by='date').reset_index(drop=True)
         return df
@@ -99,7 +102,7 @@ def load_metadata(filepath):
         st.error(f"An error occurred while loading the metadata file: {e}")
         return None
 
-# NEW: Recharge Calculation Function
+# ** NEW **: Recharge Calculation Function
 def calculate_annual_recharge(df, sy):
     """Calculates annual recharge using the Water Table Fluctuation method."""
     if df is None or df.empty:
@@ -107,18 +110,20 @@ def calculate_annual_recharge(df, sy):
     
     df_copy = df.copy().set_index('date')
     
+    # Define hydrological year (e.g., June to May)
     df_copy['hydro_year'] = df_copy.index.year.where(df_copy.index.month >= 6, df_copy.index.year - 1)
     
     recharge_data = []
     for year, group in df_copy.groupby('hydro_year'):
+        # Ensure there's enough data to be representative
         if len(group) < 90:
             continue
         
-        peak_level = group['value'].min()
-        lowest_level = group['value'].max()
+        peak_level = group['value'].min() # Highest water level (min value)
+        lowest_level = group['value'].max() # Lowest water level (max value)
         dh = lowest_level - peak_level
         
-        if dh > 0:
+        if dh > 0: # Ensure there was a fluctuation
             recharge = sy * dh
             avg_level = group['value'].mean()
             recharge_data.append({
@@ -171,8 +176,10 @@ if df is not None and not df.empty:
     st.title(f"Dashboard for Well: {current_well_no}")
     st.markdown("---")
     
-    # --- METADATA, STATS, AND HISTORICAL GRAPHS (RESTORED) ---
     df['year'], df['month'] = df['date'].dt.year, df['date'].dt.strftime('%B')
+    
+    # Calculate Recharge Pattern (Deviation from 30-day moving average)
+    df['recharge_pattern'] = df['value'].rolling(window=30, min_periods=1).mean() - df['value']
     
     well_metadata = None
     if metadata_df is not None:
@@ -228,8 +235,30 @@ if df is not None and not df.empty:
         display_df = df[df['date'] >= start_date]
 
     fig_line = go.Figure(go.Scatter(x=display_df['date'], y=display_df['value'], mode='lines', name='Daily Water Level'))
-    fig_line.update_layout(title='Daily Water Level Over Time', template=chart_theme, plot_bgcolor='rgba(0,0,0,0)', paper_bgcolor='rgba(0,0,0,0)')
+    fig_line.update_layout(title='Daily Water Level Over Time', yaxis_title="Water Level (m below ground)", template=chart_theme, plot_bgcolor='rgba(0,0,0,0)', paper_bgcolor='rgba(0,0,0,0)')
+    fig_line.update_yaxes(autorange="reversed")
     st.plotly_chart(fig_line, use_container_width=True)
+    st.markdown("<br>", unsafe_allow_html=True)
+
+    st.subheader("Recharge Patterns")
+    st.markdown("This chart shows the deviation of the daily water level from its 30-day moving average. A positive value indicates the water level is higher (better) than the recent average, suggesting a positive recharge trend.")
+    
+    recharge_duration_options = ["3D", "1W", "1M", "3M", "6M"]
+    selected_recharge_duration = st.radio("Select Recharge Duration", options=recharge_duration_options, index=len(recharge_duration_options)-1, horizontal=True, label_visibility="collapsed", key='recharge_duration_key')
+
+    recharge_display_df = df
+    if selected_recharge_duration != "Max":
+        if selected_recharge_duration == "3D": start_date_recharge = end_date - pd.Timedelta(days=3)
+        elif selected_recharge_duration == "1W": start_date_recharge = end_date - pd.Timedelta(weeks=1)
+        elif selected_recharge_duration == "1M": start_date_recharge = end_date - pd.DateOffset(months=1)
+        elif selected_recharge_duration == "3M": start_date_recharge = end_date - pd.DateOffset(months=3)
+        elif selected_recharge_duration == "6M": start_date_recharge = end_date - pd.DateOffset(months=6)
+        recharge_display_df = df[df['date'] >= start_date_recharge]
+
+    fig_recharge = go.Figure(go.Scatter(x=recharge_display_df['date'], y=recharge_display_df['recharge_pattern'], mode='lines', fill='tozeroy', name='Recharge Deviation'))
+    fig_recharge.update_layout(title='Recharge Pattern (Deviation from 30-Day Average)', yaxis_title="Deviation (m)", template=chart_theme, plot_bgcolor='rgba(0,0,0,0)', paper_bgcolor='rgba(0,0,0,0)')
+    fig_recharge.add_hline(y=0, line_width=1, line_dash="dash", line_color="grey")
+    st.plotly_chart(fig_recharge, use_container_width=True)
     st.markdown("<br>", unsafe_allow_html=True)
     
     st.subheader("Periodic Analysis")
@@ -238,18 +267,20 @@ if df is not None and not df.empty:
         yearly_avg = df.groupby('year')['value'].mean().reset_index()
         fig_bar = px.bar(yearly_avg, x='year', y='value', title='Average Annual Water Level')
         fig_bar.update_layout(template=chart_theme, plot_bgcolor='rgba(0,0,0,0)', paper_bgcolor='rgba(0,0,0,0)')
+        fig_bar.update_yaxes(autorange="reversed")
         st.plotly_chart(fig_bar, use_container_width=True)
     with colB:
         df['month_num'] = df['date'].dt.month
         monthly_range = df.groupby(['month', 'month_num'])['value'].agg(['min', 'max']).reset_index().sort_values('month_num')
         fig_range = go.Figure()
-        fig_range.add_trace(go.Scatter(x=monthly_range['month'], y=monthly_range['max'], mode='lines', name='Max Level'))
-        fig_range.add_trace(go.Scatter(x=monthly_range['month'], y=monthly_range['min'], mode='lines', name='Min Level', fill='tonexty'))
+        fig_range.add_trace(go.Scatter(x=monthly_range['month'], y=monthly_range['max'], mode='lines', name='Lowest Level'))
+        fig_range.add_trace(go.Scatter(x=monthly_range['month'], y=monthly_range['min'], mode='lines', name='Highest Level', fill='tonexty'))
         fig_range.update_layout(title='Monthly Water Level Range', template=chart_theme, plot_bgcolor='rgba(0,0,0,0)', paper_bgcolor='rgba(0,0,0,0)')
+        fig_range.update_yaxes(autorange="reversed")
         st.plotly_chart(fig_range, use_container_width=True)
     st.markdown("---")
-    
-    # --- Groundwater Recharge Section ---
+
+    # --- ** NEW ** Groundwater Recharge Section ---
     st.header("Groundwater Recharge Analysis (WTF Method)")
     
     sy_value = st.slider(
@@ -301,5 +332,5 @@ if df is not None and not df.empty:
             st.plotly_chart(fig_comparison, use_container_width=True)
             
     else:
-        st.warning("Could not calculate recharge. The dataset might not contain enough data spanning pre and post-monsoon seasons.")
+        st.warning("Could not calculate annual recharge. The dataset might not contain enough data spanning pre and post-monsoon seasons for each year.")
 

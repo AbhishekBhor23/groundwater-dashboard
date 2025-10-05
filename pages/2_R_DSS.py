@@ -61,13 +61,14 @@ def update_master_state(master_key, child_key):
 @st.cache_data
 def get_full_well_history(well_no):
     APPS_SCRIPT_URL = "https://script.google.com/macros/s/AKfycbwYz0qXjiJD3k6vIuJ5eNdthQV4Tf14EyiyuT8VTE0-NWN-aoY5qZXBBzUDK2LZjGsL/exec"
-    api_url = f"{APPS_SCRIPT_URL}?wellNo={well_no}&mode=full"
+    api_url = f"{APPS_SCRIPT_URL}?wellNo={well_no}"
     try:
         response = requests.get(api_url)
         response.raise_for_status()
         data = response.json()
-        if "error" in data or not data: return None
-        df = pd.DataFrame(data)
+        if data.get("error") or not data.get("historicalData"): return None
+        df = pd.DataFrame(data['historicalData'])
+        df.rename(columns={'timestamp': 'date', 'water_level': 'value'}, inplace=True)
         df['date'] = pd.to_datetime(df['date'])
         df = df.sort_values(by='date').reset_index(drop=True)
         return df
@@ -101,12 +102,16 @@ def get_monsoon_rise(df):
     if df is None or df.empty: return 0, 0
     df['year'] = df['date'].dt.year
     df['month'] = df['date'].dt.month
-    last_year = df['year'].max()
-    pre_monsoon_level = df[(df['year'] == last_year) & (df['month'] == 5)]['value'].mean()
-    post_monsoon_level = df[(df['year'] == last_year) & (df['month'] == 11)]['value'].mean()
+    last_year_df = df[df['year'] == df['year'].max()]
+    if last_year_df.empty:
+        return 0, df['value'].iloc[-1] if not df.empty else 0
+        
+    pre_monsoon_level = last_year_df[last_year_df['month'].isin([4, 5])]['value'].mean()
+    post_monsoon_level = last_year_df[last_year_df['month'].isin([10, 11])]['value'].mean()
+    
     if pd.isna(pre_monsoon_level) or pd.isna(post_monsoon_level):
-        last_level = df['value'].iloc[-1] if not df.empty else 0
-        return 0, last_level
+        return 0, df['value'].iloc[-1]
+        
     delta_h = pre_monsoon_level - post_monsoon_level
     return max(0, delta_h), df['value'].iloc[-1]
 
@@ -124,11 +129,11 @@ def calculate_decline_rate(df):
     return slope if slope > 0 else 0
 
 def calculate_recharge_wtf(delta_h, area_ha, specific_yield):
-    return (delta_h * area_ha * specific_yield) * 0.00001
+    return (delta_h * area_ha * specific_yield) * 10000 / 1_000_000_000 # Convert Ha to m2 and m3 to BCM
 
 def calculate_recharge_rif(rainfall_mm, area_ha, rfif):
     a = 0.08
-    return max(0, (rfif * area_ha * (rainfall_mm - a) / 1000) * 0.00001)
+    return max(0, (rfif * area_ha * (rainfall_mm - a) / 1000)) * 10000 / 1_000_000_000
 
 def calculate_validated_recharge(recharge_wtf, recharge_rif):
     if recharge_rif == 0: return recharge_wtf
@@ -138,22 +143,32 @@ def calculate_validated_recharge(recharge_wtf, recharge_rif):
     else: return 1.2 * recharge_rif
 
 def calculate_annual_draft(daily_pumping_m3):
-    return (daily_pumping_m3 * 365) / 1_000_000_000
+    return (daily_pumping_m3 * 365) / 1_000_000_000 # in BCM
 
+# --- UPDATED ET DRAFT CALCULATION ---
 def calculate_et_draft(evaporation_mm_day, transpiration_mm_day, area_ha, latest_water_level_mbgl):
     total_et_draft_m3 = 0
     area_m2 = area_ha * 10000
+    # Evaporation (hard cutoff at 1m)
     if latest_water_level_mbgl <= 1.0:
         total_et_draft_m3 += (evaporation_mm_day / 1000) * area_m2 * 365
-    if latest_water_level_mbgl <= 3.5:
-        total_et_draft_m3 += (transpiration_mm_day / 1000) * area_m2 * 365
-    return total_et_draft_m3 / 1_000_000_000
+    
+    # Transpiration (linear scaling from 1m to 5m)
+    if latest_water_level_mbgl < 5.0:
+        if latest_water_level_mbgl <= 1.0:
+            scaling_factor = 1.0
+        else:
+            # Linear decrease from 1.0 at 1m to 0.0 at 5m
+            scaling_factor = 1.0 - ((latest_water_level_mbgl - 1.0) / 4.0)
+        total_et_draft_m3 += (transpiration_mm_day / 1000) * area_m2 * 365 * scaling_factor
+        
+    return total_et_draft_m3 / 1_000_000_000 # in BCM
 
 def calculate_net_groundwater_availability(annual_recharge_bcm, total_draft_bcm):
     return annual_recharge_bcm - total_draft_bcm
 
 def calculate_stage_of_extraction(total_draft_bcm, annual_recharge_bcm):
-    if annual_recharge_bcm <= 0: return 200
+    if annual_recharge_bcm <= 0: return 200.0 # Return a high value to indicate over-exploited
     return (total_draft_bcm / annual_recharge_bcm) * 100
 
 def get_recommendation(stage):
@@ -215,6 +230,7 @@ def create_report(well_no, meta_row, hist_df, common_inputs, researcher_inputs, 
     
     pdf.add_page()
     hist_df['month_name'] = hist_df['date'].dt.strftime('%B')
+    hist_df['month_num'] = hist_df['date'].dt.month
     monthly_range = hist_df.groupby(['month_name', 'month_num'])['value'].agg(['min', 'max']).reset_index().sort_values('month_num')
     range_fig = go.Figure()
     range_fig.add_trace(go.Scatter(x=monthly_range['month_name'], y=monthly_range['max'], mode='lines', name='Max Level'))
@@ -243,7 +259,7 @@ def create_report(well_no, meta_row, hist_df, common_inputs, researcher_inputs, 
     
     forecast_fig.update_layout(template="plotly_white")
     pdf.image(io.BytesIO(forecast_fig.to_image(format="png")), x=10, w=190)
-    return pdf.output(dest='S')
+    return pdf.output(dest='S').encode('latin-1')
 
 # --- Main Dashboard UI ---
 st.title("🧠 Groundwater Management Suite (GMS)")
@@ -293,32 +309,41 @@ else:
     with col3:
         area = st.slider("Assessment Area (Ha)", 10, 50000, 10000, 100)
 
+    # --- UPDATED CALCULATION LOGIC ---
+    # Calculations for the main forecast graph (driven by the "Base" slider)
     delta_h, latest_level = get_monsoon_rise(historical_df)
     base_annual_recharge = calculate_validated_recharge(calculate_recharge_wtf(delta_h, area, specific_yield), calculate_recharge_rif(rainfall, area, rfif))
-    base_annual_draft = calculate_annual_draft(pumping)
+    base_annual_draft = calculate_annual_draft(pumping) # Driven by the main slider
+    base_et_draft_bcm = calculate_et_draft(st.session_state.evaporation, st.session_state.transpiration, area, latest_level)
+    main_scenario_draft = base_annual_draft + base_et_draft_bcm
+    main_scenario_net_availability = calculate_net_groundwater_availability(base_annual_recharge, main_scenario_draft)
+
+    # Calculations for the intervention tabs (driven by session_state sliders)
     additional_recharge_bcm = sum(st.session_state[k] for k in policy_inputs if 'recharge' in k) / 1_000_000_000
-    policy_annual_draft_bcm = sum(st.session_state[k] for k in policy_inputs if 'draft' in k) / 1_000_000_000
-    et_draft_bcm = calculate_et_draft(st.session_state.evaporation, st.session_state.transpiration, area, latest_level)
-
+    policy_annual_draft_m3 = sum(st.session_state[k] for k in policy_inputs if 'draft' in k)
+    policy_annual_draft_bcm = policy_annual_draft_m3 / 1_000_000_000
+    
     final_recharge = base_annual_recharge + additional_recharge_bcm
-    final_draft = policy_annual_draft_bcm + et_draft_bcm
+    final_draft = policy_annual_draft_bcm + base_et_draft_bcm # Note: Uses policy draft
     final_net_availability = calculate_net_groundwater_availability(final_recharge, final_draft)
-
+    
     st.markdown("---")
     st.markdown("#### Groundwater Level Forecast")
-    st.info("This forecast is based on the combined inputs from all Core Factors and Intervention Levers.")
+    st.info("This forecast is based on the **Core Hydrogeological Factors** sliders above.")
     if historical_df is not None and not historical_df.empty:
         if area > 0 and specific_yield > 0:
-            delta_h_forecast_annual = (final_net_availability * 1_000_000_000) / ((area * 10000) * specific_yield)
+            # Use the net availability from the main scenario for this forecast
+            delta_h_forecast_annual = (main_scenario_net_availability * 1_000_000_000) / ((area * 10000) * specific_yield)
             forecasted_level_main = latest_level - (delta_h_forecast_annual / 4) 
         else:
             forecasted_level_main = latest_level
         last_date = historical_df['date'].iloc[-1]
         forecast_date_main = last_date + pd.DateOffset(months=3)
         fig_forecast = go.Figure()
-        fig_forecast.add_trace(go.Scatter(x=historical_df['date'], y=historical_df['value'], mode='lines', name='Historical Water Level'))
-        fig_forecast.add_trace(go.Scatter(x=[last_date, forecast_date_main], y=[latest_level, forecasted_level_main], mode='lines+markers', name='3-Month Forecast', line=dict(dash='dot')))
-        fig_forecast.update_layout(title='Groundwater Level Forecast', template=chart_theme, plot_bgcolor='rgba(0,0,0,0)', paper_bgcolor='rgba(0,0,0,0)')
+        fig_forecast.add_trace(go.Scatter(x=historical_df['date'], y=historical_df['value'], mode='lines', name='Historical Water Level', line=dict(color='royalblue')))
+        fig_forecast.add_trace(go.Scatter(x=[last_date, forecast_date_main], y=[latest_level, forecasted_level_main], mode='lines+markers', name='3-Month Forecast', line=dict(color='red', dash='dot')))
+        fig_forecast.update_layout(title='Groundwater Level Forecast', template=chart_theme, plot_bgcolor='rgba(0,0,0,0)', paper_bgcolor='rgba(0,0,0,0)', yaxis_title="Water Level (m below ground)")
+        fig_forecast.update_yaxes(autorange="reversed")
         st.plotly_chart(fig_forecast, use_container_width=True)
     else:
         st.warning("Historical data not available for this well.")
@@ -326,18 +351,23 @@ else:
     st.markdown('</div>', unsafe_allow_html=True)
     
     farmer_tab, researcher_tab, policymaker_tab = st.tabs(["👨‍🌾 For Farmers", "🔬 For Researchers", "🏛️ For Policy Makers"])
+    
+    # Base calculations for comparison deltas
     base_stage_of_extraction = calculate_stage_of_extraction(base_annual_draft, base_annual_recharge)
     base_net_availability = calculate_net_groundwater_availability(base_annual_recharge, base_annual_draft)
 
     def render_prediction_section(user_type):
         st.markdown("---")
         st.subheader("Custom Forecast")
+        st.markdown("This forecast reflects the combined impact of **Core Factors** and the **Intervention Levers** within the tabs.")
         duration_months = st.slider("Forecast Duration (Months)", 1, 12, 3, key=f"duration_{user_type}")
         if area > 0 and specific_yield > 0:
+            # Use the final availability (including policy levers) for this forecast
             delta_h_forecast_annual = (final_net_availability * 1_000_000_000) / ((area * 10000) * specific_yield)
             forecasted_level = latest_level - (delta_h_forecast_annual / 12 * duration_months)
         else:
             forecasted_level = latest_level
+            
         stage_after = calculate_stage_of_extraction(final_draft, final_recharge)
         recommendation_after, color_after, _ = get_recommendation(stage_after)
         pred_col1, pred_col2 = st.columns(2)
@@ -350,6 +380,9 @@ else:
 
     with farmer_tab:
         st.markdown('<div class="dss-container">', unsafe_allow_html=True)
+        # --- REORDERED: Custom Forecast is now first ---
+        render_prediction_section("farmer")
+        
         st.header("Irrigation Calculator")
         CROP_COEFFICIENTS = {"Wheat": {"Initial": 0.40, "Development": 0.80, "Mid-Season": 1.15, "Late Season": 0.35},
                              "Sugarcane": {"Initial": 0.40, "Mid-Season": 1.25, "Late Season": 0.75},
@@ -392,7 +425,6 @@ else:
                 flow_rate_m3_hr = (pump_power_hp * 0.65 * 367) / total_head_m if total_head_m > 0 else 0
                 pump_hours = vol_m3 / flow_rate_m3_hr if flow_rate_m3_hr > 0 else 0
                 st.metric("Required Pumping Time", f"{pump_hours:.2f} hours")
-        render_prediction_section("farmer")
         st.markdown('</div>', unsafe_allow_html=True)
 
     def render_intervention_tab(user_type):
@@ -459,11 +491,15 @@ else:
         if user_type == "researcher":
             st.markdown("---")
             st.subheader("📄 Download Reports")
-            forecast_df = pd.DataFrame({'date': [forecast_date_main], 'value': [forecasted_level_main], 'type': ['forecasted']})
+            # Correctly create forecast_df for concatenation
+            forecast_df = pd.DataFrame({'date': [forecast_date_main], 'value': [forecasted_level_main]})
+            forecast_df['type'] = 'forecasted'
+            
             hist_df_copy = historical_df.copy()
             hist_df_copy['type'] = 'historical'
             download_df = pd.concat([hist_df_copy[['date', 'value', 'type']], forecast_df], ignore_index=True)
             csv_data = download_df.to_csv(index=False).encode('utf-8')
+            
             common_inputs = {'rainfall': rainfall, 'rfif': rfif, 'base_daily_pumping': pumping, 'specific_yield': specific_yield, 'assessment_area': area}
             researcher_inputs = {k: st.session_state[k] for k in policy_inputs}
             gms_outputs = {'projected_net_availability_MCM': f"{(max(0, final_net_availability) * 1000):.2f}",
@@ -474,8 +510,11 @@ else:
             with dl_col2:
                 if st.button("Generate Report (PDF)"):
                     with st.spinner("Generating..."):
-                        pdf_data = create_report(current_well_no, meta_row, historical_df, common_inputs, researcher_inputs, gms_outputs, fig_forecast)
-                        st.session_state.pdf_data = pdf_data
+                        if 'meta_row' in locals():
+                            pdf_data = create_report(current_well_no, meta_row, historical_df, common_inputs, researcher_inputs, gms_outputs, fig_forecast)
+                            st.session_state.pdf_data = pdf_data
+                        else:
+                            st.error("Cannot generate PDF without well metadata.")
             if 'pdf_data' in st.session_state and st.session_state.pdf_data:
                  st.download_button(label="Download PDF", data=st.session_state.pdf_data, file_name=f"report_{current_well_no}.pdf", mime="application/pdf")
         st.markdown('</div>', unsafe_allow_html=True)
@@ -484,4 +523,3 @@ else:
         render_intervention_tab("researcher")
     with policymaker_tab:
         render_intervention_tab("policy_maker")
-
